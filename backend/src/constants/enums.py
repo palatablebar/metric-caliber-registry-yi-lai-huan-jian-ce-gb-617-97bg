@@ -84,6 +84,34 @@ DEPENDENCY_KIND_LABELS: dict[str, str] = {
 }
 
 
+class Availability(StrEnum):
+    """指标可用性：自身与全部间接上游都正常才可用。"""
+
+    AVAILABLE = "available"
+    BLOCKED = "blocked"
+
+
+AVAILABILITY_LABELS: dict[str, str] = {
+    Availability.AVAILABLE.value: "可用",
+    Availability.BLOCKED.value: "不可用",
+}
+
+
+class BlockReason(StrEnum):
+    """阻断原因：自身异常或最近的异常上游。"""
+
+    DISABLED = "disabled"
+    DEPRECATED = "deprecated"
+    PARSE_ERROR = "parse_error"
+
+
+BLOCK_REASON_LABELS: dict[str, str] = {
+    BlockReason.DISABLED.value: "指标停用",
+    BlockReason.DEPRECATED.value: "指标已下线",
+    BlockReason.PARSE_ERROR.value: "解析失败",
+}
+
+
 class ChangeKind(StrEnum):
     FIELD_TYPE = "field_type"
     CALIBER = "caliber"

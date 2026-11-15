@@ -6,7 +6,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.models.formula import Formula
-from src.services import audit_service, formula_service, metric_service, report_service
+from src.services import (
+    audit_service,
+    formula_service,
+    graph_service,
+    metric_service,
+    report_service,
+    validation_service,
+)
 
 
 def list_metrics(db: Session, **filters) -> dict:
@@ -14,6 +21,7 @@ def list_metrics(db: Session, **filters) -> dict:
         db,
         formulas=formula_service.latest_map(db),
         reports_index=report_service.reports_by_metric(db),
+        availability_map=graph_service.availability_map(db),
         **filters,
     )
 
@@ -22,11 +30,13 @@ def detail(db: Session, metric_id: int) -> dict:
     metric = metric_service.get_metric(db, metric_id)
     formula = formula_service.latest_for(db, metric)
     reports = report_service.reports_by_metric(db).get(metric.code, [])
+    verdict = graph_service.availability_map(db).get(metric.code)
     return {
         "metric": metric_service.serialize(
             metric, formula,
             report_names=[report["name"] for report in reports],
             dep_codes=[dep for dep in ((formula.parsed or {}).get("deps") or [])] if formula else [],
+            availability=verdict,
         ),
         "history": [
             formula_service.serialize(row)
@@ -43,6 +53,8 @@ def create_metric(db: Session, payload: dict, principal: dict, request: Request)
         formula_service.save_version(
             db, metric, dsl_text=payload["dsl_text"], author_email=principal["email"], note="注册时初始口径"
         )
+    # 关系变了就立刻重建依赖边并发布新结论，避免详情/依赖图看到旧口径。
+    validation_service.recompute(db)
     audit_service.record(
         db,
         actor_email=principal["email"],
@@ -55,12 +67,16 @@ def create_metric(db: Session, payload: dict, principal: dict, request: Request)
     )
     db.commit()
     formula = formula_service.latest_for(db, metric)
-    return metric_service.serialize(metric, formula)
+    return metric_service.serialize(
+        metric, formula, availability=graph_service.availability_map(db).get(metric.code)
+    )
 
 
 def update_metric(db: Session, metric_id: int, payload: dict, principal: dict, request: Request) -> dict:
     metric = metric_service.get_metric(db, metric_id)
     metric_service.update_metric(db, metric, payload)
+    # 启停 / 下线会改变下游可用性，必须与依赖边、快照一起切换。
+    validation_service.recompute(db)
     audit_service.record(
         db,
         actor_email=principal["email"],
@@ -72,7 +88,11 @@ def update_metric(db: Session, metric_id: int, payload: dict, principal: dict, r
         ip=request.client.host if request.client else None,
     )
     db.commit()
-    return metric_service.serialize(metric, formula_service.latest_for(db, metric))
+    return metric_service.serialize(
+        metric,
+        formula_service.latest_for(db, metric),
+        availability=graph_service.availability_map(db).get(metric.code),
+    )
 
 
 def parse_dsl(db: Session, metric_id: int, dsl_text: str, principal: dict) -> dict:
@@ -89,6 +109,7 @@ def save_formula(db: Session, metric_id: int, payload: dict, principal: dict, re
         author_email=principal["email"],
         note=payload.get("note"),
     )
+    validation_service.recompute(db)
     audit_service.record(
         db,
         actor_email=principal["email"],

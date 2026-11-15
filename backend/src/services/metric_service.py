@@ -23,8 +23,19 @@ def serialize(
     *,
     report_names: list[str] | None = None,
     dep_codes: list[str] | None = None,
+    availability: dict | None = None,
 ) -> dict:
     parsed = (formula.parsed or {}) if formula else {}
+    verdict = availability or {
+        "status": "available",
+        "block_reason": None,
+        "blocked_by": None,
+        "blocked_by_name": None,
+        "chain": [],
+        "chain_names": [],
+        "chain_reasons": [],
+        "summary": "",
+    }
     return {
         "id": metric.id,
         "code": metric.code,
@@ -52,6 +63,13 @@ def serialize(
         "dep_metrics": dep_codes or [],
         "reports": report_names or [],
         "report_count": len(report_names or []),
+        "availability": verdict["status"],
+        "block_reason": verdict.get("block_reason"),
+        "blocked_by": verdict.get("blocked_by"),
+        "blocked_by_name": verdict.get("blocked_by_name"),
+        "block_chain": verdict.get("chain") or [],
+        "block_chain_names": verdict.get("chain_names") or [],
+        "block_summary": verdict.get("summary") or "",
         "enabled": metric.enabled,
         "created_by": metric.created_by,
         "created_at": iso_utc(metric.created_at),
@@ -66,29 +84,32 @@ def list_metrics(
     domain: str | None = None,
     tier: str | None = None,
     status: str | None = None,
+    availability: str | None = None,
     limit: int = 20,
     offset: int = 0,
     formulas: dict[int, Formula] | None = None,
     reports_index: dict[str, list[dict]] | None = None,
+    availability_map: dict[str, dict] | None = None,
 ) -> dict:
     formulas = formulas if formulas is not None else {}
     reports_index = reports_index or {}
+    verdicts = availability_map or {}
     stmt = select(Metric)
-    count_stmt = select(func.count()).select_from(Metric)
     if q:
         like = f"%{q.strip()}%"
         stmt = stmt.where(Metric.name.ilike(like) | Metric.code.ilike(like))
-        count_stmt = count_stmt.where(Metric.name.ilike(like) | Metric.code.ilike(like))
     if domain:
         stmt = stmt.where(Metric.domain == domain)
-        count_stmt = count_stmt.where(Metric.domain == domain)
     if tier:
         stmt = stmt.where(Metric.tier == tier)
-        count_stmt = count_stmt.where(Metric.tier == tier)
     if status:
         stmt = stmt.where(Metric.status == status)
-        count_stmt = count_stmt.where(Metric.status == status)
-    total = db.scalar(count_stmt) or 0
+    if availability:
+        matched = sorted(
+            code for code, item in verdicts.items() if item["status"] == availability
+        )
+        stmt = stmt.where(Metric.code.in_(matched) if availability == "blocked" else Metric.code.notin_(matched))
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = db.scalars(stmt.order_by(Metric.code).limit(limit).offset(offset)).all()
     dep_codes = _dep_codes(db, [metric.id for metric in rows])
     items = [
@@ -97,6 +118,7 @@ def list_metrics(
             formulas.get(row.id),
             report_names=[report["name"] for report in reports_index.get(row.code, [])],
             dep_codes=dep_codes.get(row.id, []),
+            availability=verdicts.get(row.code),
         )
         for row in rows
     ]

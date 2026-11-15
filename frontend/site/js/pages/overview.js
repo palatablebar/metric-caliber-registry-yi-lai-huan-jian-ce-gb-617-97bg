@@ -1,6 +1,6 @@
 import { api } from '../api.js';
-import { BRAND, ENUMS, badgeTone, can } from '../config.js';
-import { barList, cyclePath, emptyState, errorBox, errorMessage, esc, fmtTime, statStrip, table, trendChart } from '../ui.js';
+import { BRAND, ENUMS, availabilityTone, badgeTone, can } from '../config.js';
+import { barList, blockChain, cyclePath, emptyState, errorBox, errorMessage, esc, fmtTime, statStrip, table, trendChart } from '../ui.js';
 
 export const overviewPage = {
   async render(view, ctx) {
@@ -25,6 +25,7 @@ export const overviewPage = {
         { label: 'L · 依赖环', value: data.cycles_total, hint: data.cycle_paths[0] ? 'SCC 检出' : '暂无环' },
         { label: 'H · 高风险', value: data.high_risk, hint: '影响面 ≥ 核心报表级' },
         { label: 'A · 待审批', value: data.pending_changes, hint: '变更单等管理员批准' },
+        { label: 'B · 不可用', value: data.blocked_total, hint: `可用 ${data.available_total} 条 · 上游异常传播` },
       ])}
       <div class="grid-2">
         <section class="panel">
@@ -68,6 +69,31 @@ export const overviewPage = {
           ],
           empty: { title: '没有同名冲突', hint: '48 条口径目前没有同名不同口径的情况。' },
         })}
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h2>可用性阻断</h2><span class="meta">availability · 上游异常传播</span></div>
+        <div class="panel-body">
+          ${
+            data.blocked_metrics.length
+              ? `<div class="list-tight">${data.blocked_metrics
+                  .map(
+                    (item) => `<div class="impact-row" style="align-items:flex-start">
+                      <div style="display:grid;gap:6px">
+                        <span class="index-tag">${esc(item.code)} · ${esc(ENUMS.blockReason[item.reason] || item.reason)}</span>
+                        ${blockChain(item.chain, item.chain_names)}
+                      </div>
+                      <span class="badge ${availabilityTone('blocked')}">不可用</span>
+                    </div>`,
+                  )
+                  .join('')}</div>`
+              : emptyState({ title: '全部指标可用', hint: '自身与全部间接上游都正常。' })
+          }
+          ${
+            data.block_reasons.length
+              ? `<hr class="hr" />${barList(data.block_reasons, 'warn')}`
+              : ''
+          }
+        </div>
       </section>
       <div class="grid-2">
         <section class="panel">

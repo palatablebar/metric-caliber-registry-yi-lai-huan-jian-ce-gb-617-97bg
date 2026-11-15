@@ -1,4 +1,4 @@
-"""依赖图控制器：边列表 + 图结构 + 环路径。"""
+"""依赖图控制器：边列表 + 图结构 + 环路径 + 可用性结论。"""
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
@@ -12,6 +12,11 @@ def list_edges(db: Session, **filters) -> dict:
 
 def graph(db: Session) -> dict:
     return graph_service.graph(db)
+
+
+def availability(db: Session) -> dict:
+    """统一的可用性结论：自身 + 全部间接上游正常才可用，否则一条阻断链。"""
+    return graph_service.availability_report(db)
 
 
 def cycles(db: Session) -> dict:

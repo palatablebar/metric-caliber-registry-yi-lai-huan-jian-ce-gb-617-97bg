@@ -181,6 +181,22 @@ export function cyclePath(path) {
     .join('')}</div>`;
 }
 
+export function blockChain(chain, names) {
+  const nodes = chain || [];
+  if (!nodes.length) return '<p class="muted">—</p>';
+  const label = (code, index) => {
+    const name = (names || [])[index];
+    return name && name !== code ? `${code} · ${name}` : code;
+  };
+  return `<div class="path-chain" data-testid="block-chain">${nodes
+    .map(
+      (node, index) =>
+        (index === 0 ? '' : '<span class="arrow">→</span>') +
+        `<span class="node ${index === nodes.length - 1 ? 'bad' : ''}">${esc(label(node, index))}</span>`,
+    )
+    .join('')}</div>`;
+}
+
 export function parseGrid(parsed) {
   const cells = [
     ['聚合 agg', (parsed.aggs || []).join(' / ') || '—'],

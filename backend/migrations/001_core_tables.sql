@@ -120,3 +120,15 @@ CREATE TABLE audit_logs (
     seed_key        VARCHAR(120) UNIQUE,
     created_at      TIMESTAMP    NOT NULL
 );
+
+-- 校验结论快照：一次校验一次性切换；关系指纹唯一，同一快照重跑复用、不重复诊断。
+CREATE TABLE validation_snapshots (
+    id              SERIAL PRIMARY KEY,
+    run_id          INTEGER      REFERENCES runs(id) ON DELETE SET NULL,
+    relation_hash   VARCHAR(64)  NOT NULL UNIQUE,      -- 指标状态/口径签名/依赖/报表引用的 sha256
+    summary         JSON         NOT NULL,             -- 可用性 + 冲突 + 环 + 图节点边
+    availability    JSON         NOT NULL,             -- {code: {status, block_reason, chain, ...}}
+    active          BOOLEAN      NOT NULL DEFAULT FALSE, -- 读取方只认 active=true 的那一行
+    created_at      TIMESTAMP    NOT NULL
+);
+CREATE INDEX ix_validation_snapshots_active ON validation_snapshots (active);

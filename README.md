@@ -38,7 +38,7 @@
 |---|---|---|---|---|
 | ① | 指标注册与检索 | 指标注册 | `metric_service` + `metric_controller` | `GET/POST /api/metrics`、`GET/PATCH /api/metrics/{id}` |
 | ② | 口径 DSL 解析（算法 A） | 指标注册（抽屉内「解析预览 / 保存新版本」） | `dsl_parser` + `formula_service` + `metric_controller` | `POST /api/metrics/{id}/parse`、`POST /api/metrics/{id}/formulas` |
-| ③ | 依赖图与环检测（算法 B） | 依赖图 | `graph_analysis` + `graph_service` + `dependency_service` + `dependency_controller` | `GET /api/graph`、`GET /api/cycles`、`GET /api/dependencies` |
+| ③ | 依赖图与环检测（算法 B） | 依赖图 | `graph_analysis` + `graph_service` + `dependency_service` + `dependency_controller` | `GET /api/graph`、`GET /api/cycles`、`GET /api/dependencies`、`GET /api/availability` |
 | ④ | 口径冲突与影响面（算法 B） | 冲突与影响面 | `graph_analysis` + `graph_service` + `conflict_controller` | `GET /api/conflicts`、`GET /api/conflicts/{id}`、`GET /api/impact` |
 | ⑤ | 变更单与审批 | 变更单与导出 | `change_service` + `change_controller` | `GET/POST /api/change-requests`、`PATCH /api/change-requests/{id}` |
 | ⑥ | 报表登记与导出 | 变更单与导出（导出卡片）/ 冲突页导出按钮 | `report_service` + `export_service` + `export_controller` | `GET /api/reports`、`GET /api/exports/{metrics,conflicts,change-requests,runs}.csv` |
@@ -55,7 +55,7 @@
 | `Report` 报表 | `reports` | `models/report.py` | 只读出参（dict） | `report_service` | `report_controller` / `routes/reports.py` | `pages/graph.js` / `pages/conflicts.js` |
 | `ChangeRequest` 变更单 | `change_requests` | `models/change_request.py` | `schemas/change.py` | `change_service` | `change_controller` / `routes/change_requests.py` | `pages/changes.js` |
 
-横切表：`users`、`audit_logs`、`runs`（校验运行）。
+横切表：`users`、`audit_logs`、`runs`（校验运行）、`validation_snapshots`（校验结论快照，见 §5.3）。
 
 ## 5. 两个算法（Python 真算，结果进页面与导出）
 
@@ -76,14 +76,39 @@ UNBALANCED_PAREN / SELF_REFERENCE / NO_FIELD`。
 - **影响面** = 下游报表按权重求和（核心报表 ×3），`score >= 8` high、`>= 3` medium、否则 low；
 - 字段影响面：`impact_of_field('dwd.order.amount')` → 3 个指标 / 5 张报表 / 11 分 / high（验收数字）。
 
+### 5.3｜指标可用性与阻断链（`graph_analysis.availability_map`）
+
+**统一结论**：一个指标可用 ⇔ 它自身正常（未停用 / 未下线 / 解析通过）**且全部间接上游都可用**。
+上游异常（停用、下线、解析失败）会沿依赖边向下传播，下游即使自己口径没问题也判为不可用。
+
+- 每个指标只产出**一条**阻断链：自身异常时链就是它自己；否则取到最近异常上游的最短路径，
+  同长度取字典序最小 —— 同一关系快照重跑，结论逐字一致；
+- 共享下游即使有多个异常上游，也只给一条链、只计一次（`blocked_total` 按指标编码去重）；
+- 恢复上游后重算，链自动消失、指标回到可用。
+
+**一次校验一次性切换**（`services/validation_service.py`）：
+
+1. 校验运行在**一个 SAVEPOINT** 内完成「解析全部口径 → 重建依赖边 → 计算可用性/冲突/环/图 → 发布快照」，
+   任一步失败整体回滚，上一份依赖边与快照原样保留（失败不丢数据、读侧看不到半成品）；
+2. 快照按**关系指纹**（指标状态 / 口径签名 / 依赖 / 报表引用）去重存进 `validation_snapshots`：
+   同一关系重跑直接复用旧行并重新激活，不重复落库、不重复诊断（`run.metrics.snapshot_reused=true`）；
+3. 读侧（总览 `GET /api/overview`、详情、依赖图 `GET /api/graph`、可用性 `GET /api/availability`、
+   冲突页与 `metrics.csv` / `runs.csv` 导出）都通过同一份分析结论取值，指纹一致才用快照，
+   否则按当前关系实时计算，保证四个面永远一致；
+4. 指标启停 / 口径保存这类写入也会立刻重算并发布，写后读立即一致。
+
+`可用性` 相关字段在接口与导出中统一为：`availability`（`available` / `blocked`）、`block_reason`
+（`disabled` / `deprecated` / `parse_error`）、`blocked_by`、`block_chain`（编码路径）、`block_chain_names`（带名称）。
+
+
 ## 6. 页面（6）
 
 | # | 路由 | 说明 |
 |---|---|---|
 | 1 | `#/login` | 登录：卡片柜抽屉 + 索书单表单 |
-| 2 | `#/overview` | 总览：指标 / 报表 / 同名冲突 / 依赖环 / 高风险 / 待审批，按等级与类型的条形、环路径、最近运行、7 天趋势 |
-| 3 | `#/metrics` | 指标注册：筛选 + 目录列表 + 详情抽屉（DSL 编辑、算法 A 解析预览、保存新版本、注册新指标） |
-| 4 | `#/graph` | 依赖图：节点/边统计、SCC 环路径卡、节点表 + 展开抽屉、依赖边清单（可按边类型筛选） |
+| 2 | `#/overview` | 总览：指标 / 报表 / 同名冲突 / 依赖环 / 高风险 / 待审批 / 不可用，按等级与类型的条形、可用性阻断链、环路径、最近运行、7 天趋势 |
+| 3 | `#/metrics` | 指标注册：筛选（含可用性）+ 目录列表（可用性徽标）+ 详情抽屉（阻断链、DSL 编辑、算法 A 解析预览、保存新版本、注册新指标） |
+| 4 | `#/graph` | 依赖图：节点/边统计、可用性阻断链卡、SCC 环路径卡、节点表 + 展开抽屉、依赖边清单（可按边类型筛选） |
 | 5 | `#/conflicts` | 冲突与影响面：严重度/类型筛选、两份口径并排对照、差异明细、影响面、一键提交变更单 |
 | 6 | `#/changes` | 变更单与导出：跑校验、变更单列表 + 审批抽屉、4 张 CSV 导出、审计尾迹（admin） |
 
@@ -96,6 +121,8 @@ UNBALANCED_PAREN / SELF_REFERENCE / NO_FIELD`。
 | 业务域 `trade/traffic/member/goods/finance` | `constants/enums.py::MetricDomain` | `js/config.js::ENUMS.metricDomain` | 指标注册页筛选/表单、总览域名分布、导出 |
 | 分级 `core/normal` | `MetricTier` | `ENUMS.metricTier` | 指标表徽标、详情、导出 |
 | 解析状态 `ok/error` | `ParseStatus` | `ENUMS.parseStatus` | 指标表/抽屉、依赖图节点、导出 |
+| 可用性 `available/blocked` | `Availability` | `ENUMS.availability` | 指标表/抽屉、依赖图节点/阻断卡、总览、导出 |
+| 阻断原因 `disabled/deprecated/parse_error` | `BlockReason` | `ENUMS.blockReason` | 指标抽屉、依赖图阻断卡、总览、导出 |
 | 依赖边类型 `metric/field/report` | `DependencyKind` | `ENUMS.dependencyKind` | 依赖边清单筛选、导出 |
 | 冲突类型 `filter/field/agg/dep_diff` | `ConflictKind` | `ENUMS.conflictKind` | 冲突页筛选、总览差异类型、导出 |
 | 变更类型/状态 | `ChangeKind` / `ChangeStatus` | `ENUMS.changeKind` / `ENUMS.changeStatus` | 变更单页筛选、抽屉、导出 |
@@ -118,7 +145,8 @@ SEED_SUMMARY brand=metricreg users=3 sources=48 runs=1 findings=6 pending=6
 | `findings` | 检出问题 = 5 处同名冲突 + 1 个依赖环 + 0 条解析失败 |
 | `pending` | 待审批变更单 6 张 |
 
-另有 12 张报表（4 张核心）、依赖边由校验运行按当前口径重建。
+另有 12 张报表（4 张核心）、依赖边由校验运行按当前口径重建；seed 后 48 个指标全部可用，
+校验结论快照 1 份（重复执行 seed 不新增快照、不重复诊断）。
 
 ## 9. 快速启动
 

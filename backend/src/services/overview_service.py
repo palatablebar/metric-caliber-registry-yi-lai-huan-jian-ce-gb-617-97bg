@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from src.config.settings import settings
 from src.constants.enums import (
+    AVAILABILITY_LABELS,
+    BLOCK_REASON_LABELS,
     CHANGE_STATUS_LABELS,
     CONFLICT_KIND_LABELS,
     METRIC_DOMAIN_LABELS,
@@ -70,6 +72,13 @@ def overview(db: Session) -> dict:
         trend.append({"date": day.isoformat(), "runs": count})
 
     severity_counter = summary["severity"]
+    availability = summary["availability"]
+    blocked = summary["blocked_codes"]
+    blocked_names = {node["code"]: node["name"] for node in summary["nodes"]}
+    reason_counter: dict[str, int] = {}
+    for code in blocked:
+        reason = availability[code]["block_reason"]
+        reason_counter[reason] = reason_counter.get(reason, 0) + 1
     return {
         "metrics_total": metrics_total,
         "reports_total": reports_total,
@@ -77,6 +86,34 @@ def overview(db: Session) -> dict:
         "conflicts_total": summary["conflicts_total"],
         "cycles_total": summary["cycles_total"],
         "parse_error_count": summary["parse_error_count"],
+        "available_total": summary["available_total"],
+        "blocked_total": summary["blocked_total"],
+        "availability": [
+            {
+                "key": key,
+                "label": AVAILABILITY_LABELS.get(key, key),
+                "count": summary["available_total"] if key == "available" else summary["blocked_total"],
+            }
+            for key in ("available", "blocked")
+        ],
+        "block_reasons": [
+            {"key": key, "label": BLOCK_REASON_LABELS.get(key, key), "count": reason_counter[key]}
+            for key in sorted(reason_counter)
+        ],
+        "blocked_metrics": [
+            {
+                "code": code,
+                "name": blocked_names.get(code, code),
+                "reason": availability[code]["block_reason"],
+                "reason_label": BLOCK_REASON_LABELS.get(availability[code]["block_reason"], availability[code]["block_reason"]),
+                "blocked_by": availability[code]["blocked_by"],
+                "blocked_by_name": availability[code].get("blocked_by_name"),
+                "chain": availability[code]["chain"],
+                "chain_names": availability[code].get("chain_names") or [],
+                "summary": availability[code]["summary"],
+            }
+            for code in blocked
+        ],
         "high_risk": severity_counter.get("high", 0),
         "pending_changes": pending_changes,
         "worker_alive": worker_alive(),

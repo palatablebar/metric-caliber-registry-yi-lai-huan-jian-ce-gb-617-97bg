@@ -15,7 +15,16 @@ from __future__ import annotations
 
 from collections import deque
 
-from src.constants.enums import REPORT_WEIGHT_CORE, REPORT_WEIGHT_NORMAL, Severity
+from src.constants.enums import (
+    BLOCK_REASON_LABELS,
+    REPORT_WEIGHT_CORE,
+    REPORT_WEIGHT_NORMAL,
+    Availability,
+    BlockReason,
+    MetricStatus,
+    ParseStatus,
+    Severity,
+)
 
 SEVERITY_THRESHOLDS = ((8, Severity.HIGH.value), (3, Severity.MEDIUM.value))
 
@@ -65,6 +74,101 @@ def build_dep_map(metrics: list[dict]) -> dict[str, list[str]]:
         refs = [ref for ref in (metric.get("deps") or []) if ref in known]
         dep_map[metric["code"]] = sorted(set(refs))
     return dep_map
+
+
+# ---------------------------------------------------------------------------
+# 可用性：自身 + 全部间接上游都正常才算可用；否则给出一条最短阻断链。
+# ---------------------------------------------------------------------------
+
+
+def own_defect(metric: dict) -> dict | None:
+    """指标自身异常（与上游无关）：停用 / 下线 / 解析失败。"""
+    if metric.get("enabled") is False:
+        return {"code": metric["code"], "reason": BlockReason.DISABLED.value}
+    if metric.get("status") == MetricStatus.DEPRECATED.value:
+        return {"code": metric["code"], "reason": BlockReason.DEPRECATED.value}
+    if (metric.get("parse_status") or ParseStatus.ERROR.value) != ParseStatus.OK.value:
+        return {"code": metric["code"], "reason": BlockReason.PARSE_ERROR.value}
+    return None
+
+
+def availability_map(metrics: list[dict]) -> dict[str, dict]:
+    """每个指标一条结论：status + 阻断链（自身正常但上游异常时给出可定位路径）。
+
+    阻断链 = 从该指标出发按依赖边走到的第一条自身异常的上游；同长度时取字典序最小，
+    保证同一快照重跑结果逐字一致。自身异常时链长 1（就是它自己）。
+    共享下游即使有多个异常上游，也只产出一条链、只计一次。
+    """
+    by_code = {metric["code"]: metric for metric in metrics}
+    dep_map = build_dep_map(metrics)
+    defects = {code: own_defect(metric) for code, metric in by_code.items()}
+    names = {code: metric.get("name") or code for code, metric in by_code.items()}
+    result: dict[str, dict] = {}
+    for code in sorted(by_code):
+        defect = defects[code]
+        if defect is not None:
+            payload = _blocked_payload(code, defect["reason"], [code])
+        else:
+            chain = _first_blocking_chain(code, dep_map, defects)
+            if chain is None:
+                result[code] = {
+                    "status": Availability.AVAILABLE.value,
+                    "block_reason": None,
+                    "blocked_by": None,
+                    "chain": [],
+                    "chain_names": [],
+                    "blocked_by_name": None,
+                    "chain_reasons": [],
+                    "summary": "",
+                }
+                continue
+            payload = _blocked_payload(code, defects[chain[-1]]["reason"], chain)
+        payload["chain_names"] = [names.get(hop, hop) for hop in payload["chain"]]
+        payload["blocked_by_name"] = names.get(payload["blocked_by"], payload["blocked_by"])
+        result[code] = payload
+    return result
+
+
+def _blocked_payload(code: str, reason: str, chain: list[str]) -> dict:
+    root = chain[-1]
+    label = BLOCK_REASON_LABELS.get(reason, reason)
+    if root == code:
+        summary = f"{code} 自身{label}"
+    else:
+        summary = f"{code} 被上游 {root} 阻断（{label}）：" + " → ".join(chain)
+    return {
+        "status": Availability.BLOCKED.value,
+        "block_reason": reason,
+        "blocked_by": root,
+        "chain": chain,
+        "chain_reasons": [reason],
+        "summary": summary,
+    }
+
+
+def _first_blocking_chain(start: str, dep_map: dict[str, list[str]], defects: dict[str, dict | None]) -> list[str] | None:
+    """按层 BFS 找最短阻断链；同层取字典序最小，保证同一快照重跑结果一致。
+
+    多条路径汇聚到同一异常上游时只产出这一条链（去重由 visited 保证），
+    因此共享下游不会因为多个异常上游而被重复计数。
+    """
+    frontier: list[tuple[str, ...]] = [(start,)]
+    expanded = {start}
+    while frontier:
+        next_level: dict[str, tuple[str, ...]] = {}
+        for path in frontier:
+            for ref in dep_map.get(path[-1], []):
+                if ref in path:
+                    continue
+                candidate = path + (ref,)
+                if defects.get(ref) is not None:
+                    return list(candidate)
+                if ref in expanded:
+                    continue
+                expanded.add(ref)
+                next_level.setdefault(ref, candidate)
+        frontier = sorted(next_level.values())
+    return None
 
 
 def tarjan_scc(dep_map: dict[str, list[str]]) -> list[list[str]]:
@@ -294,21 +398,106 @@ def impact_of_field(field: str, metrics: list[dict], reports_by_metric: dict[str
     return impact
 
 
-def summarize(metrics: list[dict], reports_by_metric: dict[str, list[dict]]) -> dict:
-    conflicts = find_conflicts(metrics, reports_by_metric)
+def build_analysis(metrics: list[dict], reports_by_metric: dict[str, list[dict]]) -> dict:
+    """一次算完全部诊断结论：可用性 + 冲突 + 环 + 图结构。
+
+    总览、详情、依赖图、冲突页与导出都只读这一份结构，避免各页面各算一套。
+    """
+    dep_map = build_dep_map(metrics)
     cycles = find_cycles(metrics, reports_by_metric)
+    conflicts = find_conflicts(metrics, reports_by_metric)
+    availability = availability_map(metrics)
+    report_codes = {
+        code: [report["code"] for report in reports] for code, reports in reports_by_metric.items()
+    }
+    in_cycle = {code for cycle in cycles for code in cycle["members"]}
     parse_errors = [metric["code"] for metric in metrics if metric.get("parse_status") == "error"]
     severity_counter = {Severity.HIGH.value: 0, Severity.MEDIUM.value: 0, Severity.LOW.value: 0}
     for item in conflicts + cycles:
         severity_counter[item["severity"]] = severity_counter.get(item["severity"], 0) + 1
+    blocked = sorted(code for code, item in availability.items() if item["status"] == Availability.BLOCKED.value)
+
+    nodes = [
+        {
+            "code": metric["code"],
+            "name": metric["name"],
+            "domain": metric["domain"],
+            "domain_label": metric.get("domain_label") or metric["domain"],
+            "tier": metric["tier"],
+            "owner": metric.get("owner"),
+            "version": metric.get("version"),
+            "parse_status": metric.get("parse_status"),
+            "enabled": metric.get("enabled", True),
+            "status": metric.get("status"),
+            "availability": availability[metric["code"]]["status"],
+            "block_reason": availability[metric["code"]]["block_reason"],
+            "blocked_by": availability[metric["code"]]["blocked_by"],
+            "blocked_by_name": availability[metric["code"]].get("blocked_by_name"),
+            "block_chain": availability[metric["code"]]["chain"],
+            "block_chain_names": availability[metric["code"]].get("chain_names") or [],
+            "block_summary": availability[metric["code"]]["summary"],
+            "in_cycle": metric["code"] in in_cycle,
+            "dep_count": len(dep_map.get(metric["code"], [])),
+            "report_count": len(report_codes.get(metric["code"], [])),
+            "reports": report_codes.get(metric["code"], []),
+        }
+        for metric in metrics
+    ]
+    edges = [
+        {"from": code, "to": ref, "kind": "metric"}
+        for code in sorted(dep_map)
+        for ref in dep_map[code]
+    ]
+    edges += [
+        {"from": code, "to": report, "kind": "report"}
+        for code in sorted(report_codes)
+        for report in report_codes[code]
+    ]
     return {
         "metrics_total": len(metrics),
         "conflicts_total": len(conflicts),
         "cycles_total": len(cycles),
         "parse_errors": parse_errors,
         "parse_error_count": len(parse_errors),
+        "availability": availability,
+        "available_total": len(metrics) - len(blocked),
+        "blocked_total": len(blocked),
+        "blocked_codes": blocked,
         "severity": severity_counter,
         "conflicts": conflicts,
         "cycles": cycles,
-        "edge_count": sum(len(refs) for refs in build_dep_map(metrics).values()),
+        "nodes": nodes,
+        "edges": edges,
+        "edge_count": sum(len(refs) for refs in dep_map.values()),
+        "stats": {
+            "nodes": len(nodes),
+            "dep_edges": sum(len(refs) for refs in dep_map.values()),
+            "report_edges": sum(len(refs) for refs in report_codes.values()),
+            "cycles": len(cycles),
+            "cycle_nodes": len(in_cycle),
+            "blocked": len(blocked),
+            "available": len(metrics) - len(blocked),
+        },
     }
+
+
+SUMMARY_KEYS = (
+    "metrics_total",
+    "conflicts_total",
+    "cycles_total",
+    "parse_errors",
+    "parse_error_count",
+    "availability",
+    "available_total",
+    "blocked_total",
+    "blocked_codes",
+    "severity",
+    "conflicts",
+    "cycles",
+    "edge_count",
+)
+
+
+def summarize(metrics: list[dict], reports_by_metric: dict[str, list[dict]]) -> dict:
+    analysis = build_analysis(metrics, reports_by_metric)
+    return {key: analysis[key] for key in SUMMARY_KEYS}

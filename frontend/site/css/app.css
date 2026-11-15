@@ -1011,6 +1011,13 @@ pre.code .err {
   color: oklch(0.38 0.1 32);
 }
 
+.path-chain .node.bad {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--paper);
+  font-weight: 600;
+}
+
 .path-chain .arrow {
   color: var(--ink-faint);
 }

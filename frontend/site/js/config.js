@@ -66,6 +66,8 @@ export const ENUMS = {
   metricTier: { core: '核心', normal: '普通' },
   metricStatus: { draft: '草稿', active: '生效中', deprecated: '已下线' },
   parseStatus: { ok: '解析通过', error: '解析失败' },
+  availability: { available: '可用', blocked: '不可用' },
+  blockReason: { disabled: '指标停用', deprecated: '指标已下线', parse_error: '解析失败' },
   dependencyKind: { metric: '指标引用', field: '字段依赖', report: '报表引用' },
   trigger: { manual: '手动', schedule: '定时', seed: '初始化' },
   runStatus: { queued: '排队中', running: '执行中', success: '成功', partial: '部分成功', failed: '失败' },
@@ -85,4 +87,8 @@ export function changeTone(status) {
 
 export function parseTone(status) {
   return status === 'ok' ? 'ok' : 'danger';
+}
+
+export function availabilityTone(status) {
+  return status === 'available' ? 'ok' : 'danger';
 }

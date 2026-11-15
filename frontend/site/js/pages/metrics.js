@@ -1,12 +1,13 @@
 import { api } from '../api.js';
-import { ENUMS, can, parseTone } from '../config.js';
-import { drawer, errorBox, errorMessage, esc, field, filterBar, fmtTime, kv, parseGrid, table, toast } from '../ui.js';
+import { ENUMS, availabilityTone, can, parseTone } from '../config.js';
+import { blockChain, drawer, errorBox, errorMessage, esc, field, filterBar, fmtTime, kv, parseGrid, table, toast } from '../ui.js';
 
-const state = { q: '', domain: '', tier: '', status: '' };
+const state = { q: '', domain: '', tier: '', status: '', availability: '' };
 
 const DOMAIN_OPTIONS = [{ value: '', label: '全部业务域' }, ...Object.entries(ENUMS.metricDomain).map(([value, label]) => ({ value, label }))];
 const TIER_OPTIONS = [{ value: '', label: '全部分级' }, ...Object.entries(ENUMS.metricTier).map(([value, label]) => ({ value, label }))];
 const STATUS_OPTIONS = [{ value: '', label: '全部状态' }, ...Object.entries(ENUMS.metricStatus).map(([value, label]) => ({ value, label }))];
+const AVAILABILITY_OPTIONS = [{ value: '', label: '全部可用性' }, ...Object.entries(ENUMS.availability).map(([value, label]) => ({ value, label }))];
 
 function openDetail(view, ctx, item) {
   const editable = can(ctx.user.role, 'formula:write');
@@ -24,11 +25,24 @@ function openDetail(view, ctx, item) {
             ['分级', `<span class="badge ${metric.tier === 'core' ? 'high' : 'info'}">${esc(metric.tier_label)}</span>`],
             ['单位 / 负责人', `${esc(metric.unit)} · ${esc(metric.owner)}`],
             ['解析状态', `<span class="badge ${parseTone(metric.parse_status)}">${esc(ENUMS.parseStatus[metric.parse_status] || metric.parse_status)}</span>`],
+            [
+              '可用性',
+              `<span class="badge ${availabilityTone(metric.availability)}">${esc(ENUMS.availability[metric.availability] || metric.availability)}</span>`,
+            ],
             ['依赖指标', (metric.deps || []).length ? esc(metric.deps.join(' / ')) : '—'],
             ['下游报表', (metric.reports || []).length ? esc(metric.reports.join(' / ')) : '—'],
             ['更新时间', fmtTime(metric.updated_at)],
             ['说明', esc(metric.description || '—')],
           ])}
+          ${
+            metric.availability === 'blocked'
+              ? `<div class="dsl-box" id="block-box">
+                  <span class="label">阻断链 · 自身与全部间接上游正常才可用</span>
+                  ${blockChain(metric.block_chain, metric.block_chain_names)}
+                  <p class="section-note">${esc(metric.block_summary || '')}</p>
+                </div>`
+              : ''
+          }
           <div class="dsl-box">
             <span class="label">口径 DSL · v${esc(metric.current_version)}</span>
             <pre class="code">${esc(metric.dsl_text || '（无）')}</pre>
@@ -153,6 +167,7 @@ export const metricsPage = {
         domain: state.domain,
         tier: state.tier,
         status: state.status,
+        availability: state.availability,
         limit: 100,
       });
     } catch (err) {
@@ -174,6 +189,7 @@ export const metricsPage = {
           { label: '业务域', name: 'domain', value: state.domain, options: DOMAIN_OPTIONS },
           { label: '分级', name: 'tier', value: state.tier, options: TIER_OPTIONS },
           { label: '状态', name: 'status', value: state.status, options: STATUS_OPTIONS },
+          { label: '可用性', name: 'availability', value: state.availability, options: AVAILABILITY_OPTIONS },
         ])}
         ${table({
           rows: data.items,
@@ -187,6 +203,12 @@ export const metricsPage = {
               key: 'parse_status',
               label: '解析',
               render: (row) => `<span class="badge ${parseTone(row.parse_status)}">${esc(ENUMS.parseStatus[row.parse_status] || row.parse_status)}</span>`,
+            },
+            {
+              key: 'availability',
+              label: '可用性',
+              render: (row) =>
+                `<span class="badge ${availabilityTone(row.availability)}">${esc(ENUMS.availability[row.availability] || row.availability)}</span>`,
             },
             { key: 'deps', label: '依赖', className: 'mono', render: (row) => esc((row.deps || []).join(' / ') || '—') },
             { key: 'report_count', label: '下游报表', className: 'num' },
@@ -203,6 +225,7 @@ export const metricsPage = {
       state.domain = filters.querySelector('[name=domain]').value;
       state.tier = filters.querySelector('[name=tier]').value;
       state.status = filters.querySelector('[name=status]').value;
+      state.availability = filters.querySelector('[name=availability]').value;
       metricsPage.render(view, ctx);
     });
     filters?.querySelector('[name=q]')?.addEventListener('keydown', (event) => {

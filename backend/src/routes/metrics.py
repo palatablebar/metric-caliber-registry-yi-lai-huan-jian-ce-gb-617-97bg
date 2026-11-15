@@ -19,6 +19,7 @@ def list_metrics(
     domain: str | None = None,
     tier: str | None = None,
     status: str | None = None,
+    availability: str | None = None,
     limit: int = Query(20),
     offset: int = Query(0),
     db: Session = Depends(get_db),
@@ -26,7 +27,14 @@ def list_metrics(
 ) -> dict:
     page = page_params(limit, offset)
     return metric_controller.list_metrics(
-        db, q=q, domain=domain, tier=tier, status=status, limit=page.limit, offset=page.offset
+        db,
+        q=q,
+        domain=domain,
+        tier=tier,
+        status=status,
+        availability=availability,
+        limit=page.limit,
+        offset=page.offset,
     )
 
 

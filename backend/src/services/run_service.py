@@ -5,10 +5,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.config.settings import settings
-from src.models.formula import Formula
-from src.models.metric import Metric
 from src.models.run import Run
-from src.services import dependency_service, dsl_parser, formula_service, graph_analysis, graph_service
+from src.services import validation_service
 from src.utils.errors import not_found
 from src.utils.timeutil import iso_utc, local_now, utcnow
 
@@ -38,44 +36,45 @@ def next_run_no(db: Session) -> str:
 def execute_run(db: Session, run: Run) -> Run:
     run.status = "running"
     try:
-        metrics = db.scalars(select(Metric).order_by(Metric.code)).all()
-        latest = formula_service.latest_map(db)
-        parsed_by_code: dict[str, dict] = {}
-        for metric in metrics:
-            formula: Formula | None = latest.get(metric.id)
-            parsed = dsl_parser.parse_dsl(formula.dsl_text if formula else "", metric.code)
-            parsed_by_code[metric.code] = parsed
-            if formula is not None:
-                formula_service.apply_parse(formula, parsed)
-        db.flush()
+        # 整个「解析 → 重建依赖边 → 诊断 → 发布快照」放进一个 SAVEPOINT：
+        # 任一步失败都整体回滚，上一份依赖边与快照原样保留，读侧不会看到半成品。
+        with db.begin_nested():
+            outcome = validation_service.recompute(db, run_id=run.id)
+            summary = outcome["analysis"]
+            dependency_stats = outcome["dependency_stats"]
 
-        dependency_stats = dependency_service.rebuild(db, metrics, parsed_by_code)
-        payloads, reports_index, _ = graph_service.collect_inputs(db)
-        summary = graph_analysis.summarize(payloads, reports_index)
-
-        issue_count = len(summary["conflicts"]) + len(summary["cycles"]) + summary["parse_error_count"]
-        run.input_count = len(metrics)
-        run.output_count = issue_count
-        run.metrics = {
-            "metrics_total": summary["metrics_total"],
-            "parsed_ok": len(metrics) - summary["parse_error_count"],
-            "parse_error_count": summary["parse_error_count"],
-            "parse_errors": summary["parse_errors"],
-            "conflicts_total": summary["conflicts_total"],
-            "cycles_total": summary["cycles_total"],
-            "severity": summary["severity"],
-            "dep_edges": dependency_stats["counts"],
-            "high_conflicts": [item["name"] for item in summary["conflicts"] if item["severity"] == "high"],
-            "cycle_paths": [" → ".join(item["path"]) for item in summary["cycles"]],
-        }
-        run.status = "success" if metrics else "partial"
-        run.log_text = (
-            f"解析 {len(metrics)} 个指标口径，失败 {summary['parse_error_count']} 个；"
-            f"依赖边 {dependency_stats['total']} 条（指标 {dependency_stats['counts']['metric']} / "
-            f"字段 {dependency_stats['counts']['field']} / 报表 {dependency_stats['counts']['report']}）；"
-            f"同名冲突 {summary['conflicts_total']} 处，依赖环 {summary['cycles_total']} 个；"
-            f"新增边 {dependency_stats['added']}，清理边 {dependency_stats['removed']}"
-        )
+            issue_count = len(summary["conflicts"]) + len(summary["cycles"]) + summary["parse_error_count"]
+            run.input_count = outcome["metrics_total"]
+            run.output_count = issue_count
+            run.metrics = {
+                "metrics_total": summary["metrics_total"],
+                "parsed_ok": summary["metrics_total"] - summary["parse_error_count"],
+                "parse_error_count": summary["parse_error_count"],
+                "parse_errors": summary["parse_errors"],
+                "conflicts_total": summary["conflicts_total"],
+                "cycles_total": summary["cycles_total"],
+                "available_total": summary["available_total"],
+                "blocked_total": summary["blocked_total"],
+                "blocked_codes": summary["blocked_codes"],
+                "severity": summary["severity"],
+                "dep_edges": dependency_stats["counts"],
+                "high_conflicts": [item["name"] for item in summary["conflicts"] if item["severity"] == "high"],
+                "cycle_paths": [" → ".join(item["path"]) for item in summary["cycles"]],
+                "snapshot_id": outcome["snapshot_id"],
+                "snapshot_hash": outcome["relation_hash"],
+                "snapshot_reused": outcome["reused"],
+            }
+            run.status = "success" if outcome["metrics_total"] else "partial"
+            run.log_text = (
+                f"解析 {outcome['metrics_total']} 个指标口径，失败 {summary['parse_error_count']} 个；"
+                f"可用 {summary['available_total']} 个，阻断 {summary['blocked_total']} 个；"
+                f"依赖边 {dependency_stats['total']} 条（指标 {dependency_stats['counts']['metric']} / "
+                f"字段 {dependency_stats['counts']['field']} / 报表 {dependency_stats['counts']['report']}）；"
+                f"同名冲突 {summary['conflicts_total']} 处，依赖环 {summary['cycles_total']} 个；"
+                f"新增边 {dependency_stats['added']}，清理边 {dependency_stats['removed']}；"
+                f"快照 {outcome['relation_hash'][:12]}"
+                + ("（复用，未重复诊断）" if outcome["reused"] else "")
+            )
     except Exception as exc:  # noqa: BLE001 - 运行失败要留痕，不抛 500
         run.status = "failed"
         run.log_text = f"校验运行失败：{exc}"
@@ -95,6 +94,9 @@ def create_and_execute(
     if seed_key:
         existing = db.scalar(select(Run).where(Run.seed_key == seed_key))
         if existing is not None:
+            # seed 重跑不新增运行，但仍按当前关系补齐/复用一次结论快照
+            # （老库升级到带快照的版本时，读侧也能拿到统一的结论）。
+            validation_service.recompute(db, run_id=existing.id)
             return existing
     run = Run(
         run_no=next_run_no(db),

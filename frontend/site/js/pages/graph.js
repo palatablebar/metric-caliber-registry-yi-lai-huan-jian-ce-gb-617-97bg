@@ -1,8 +1,31 @@
 import { api } from '../api.js';
-import { ENUMS, badgeTone, can } from '../config.js';
-import { chips, cyclePath, drawer, emptyState, errorBox, errorMessage, esc, filterBar, impactRows, kv, table, toast } from '../ui.js';
+import { ENUMS, availabilityTone, badgeTone, can } from '../config.js';
+import { blockChain, chips, cyclePath, drawer, emptyState, errorBox, errorMessage, esc, filterBar, impactRows, kv, table, toast } from '../ui.js';
 
 const state = { kind: '' };
+
+function openBlocked(view, ctx, node) {
+  drawer({
+    title: `阻断链 · ${node.name} · ${node.code}`,
+    subtitle: `${node.domain_label} / ${ENUMS.blockReason[node.block_reason] || node.block_reason}`,
+    body: `
+      ${blockChain(node.block_chain, node.block_chain_names)}
+      <dl class="kv">
+        <dt>结论</dt><dd><span class="badge ${availabilityTone(node.availability)}">${esc(ENUMS.availability[node.availability] || node.availability)}</span></dd>
+        <dt>异常上游</dt><dd class="mono">${esc(node.blocked_by)}</dd>
+        <dt>阻断原因</dt><dd>${esc(ENUMS.blockReason[node.block_reason] || node.block_reason)}</dd>
+        <dt>链长</dt><dd class="mono">${esc(node.block_chain.length)}</dd>
+      </dl>
+      <div class="dsl-box">
+        <span class="label">说明</span>
+        <p class="section-note">${esc(node.block_summary)}</p>
+      </div>
+      <div class="dsl-box">
+        <span class="label">处理建议</span>
+        <p class="section-note">恢复或修复链尾的上游指标后重跑一次校验，该指标会自动恢复可用。</p>
+      </div>`,
+  });
+}
 
 function openCycle(view, ctx, cycle) {
   drawer({
@@ -34,12 +57,22 @@ function openNode(view, ctx, node, edges) {
     subtitle: `${node.domain_label} / 版本 v${node.version} / 下游报表 ${node.report_count} 张`,
     body: `
       ${kv([
+        ['可用性', `<span class="badge ${availabilityTone(node.availability)}">${esc(ENUMS.availability[node.availability] || node.availability)}</span>`],
         ['解析状态', `<span class="badge ${node.parse_status === 'ok' ? 'ok' : 'danger'}">${esc(ENUMS.parseStatus[node.parse_status] || node.parse_status)}</span>`],
         ['分级', esc(ENUMS.metricTier[node.tier] || node.tier)],
         ['是否在环上', node.in_cycle ? '<span class="badge danger">在环上</span>' : '否'],
         ['依赖指标数', esc(node.dep_count)],
         ['下游报表数', esc(node.report_count)],
       ])}
+      ${
+        node.availability === 'blocked'
+          ? `<div class="dsl-box">
+              <span class="label">阻断链 · 到最近的异常上游</span>
+              ${blockChain(node.block_chain, node.block_chain_names)}
+              <p class="section-note">${esc(node.block_summary)}</p>
+            </div>`
+          : ''
+      }
       <div class="dsl-box">
         <span class="label">该指标引用的指标（出边）</span>
         ${outgoing.length ? chips(outgoing.map((edge) => edge.to)) : '<p class="muted">没有引用其他指标。</p>'}
@@ -73,7 +106,31 @@ export const graphPage = {
             <div class="stat"><span class="k">DEP EDGES</span><span class="v">${esc(stats.dep_edges)}</span><span class="hint">指标 → 指标</span></div>
             <div class="stat"><span class="k">REPORT EDGES</span><span class="v">${esc(stats.report_edges)}</span><span class="hint">报表引用</span></div>
             <div class="stat"><span class="k">CYCLES</span><span class="v">${esc(stats.cycles)}</span><span class="hint">环上节点 ${esc(stats.cycle_nodes)} 个</span></div>
+            <div class="stat"><span class="k">AVAILABLE</span><span class="v">${esc(stats.available)}</span><span class="hint">阻断 ${esc(stats.blocked)} 个</span></div>
           </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h2>可用性阻断（上游异常传播）</h2><span class="meta">${graph.blocked.length} 条阻断链</span></div>
+        <div class="panel-body">
+          ${
+            graph.blocked.length
+              ? `<div class="list-tight">${graph.blocked
+                  .map(
+                    (item, index) => `<div class="impact-row" data-blocked="${index}" style="cursor:pointer;align-items:flex-start">
+                      <div style="display:grid;gap:6px">
+                        <span class="index-tag">BLOCK ${String(index + 1).padStart(2, '0')} · ${esc(ENUMS.blockReason[item.reason] || item.reason)}</span>
+                        ${blockChain(item.chain, item.chain_names)}
+                      </div>
+                      <div style="display:flex;gap:8px;align-items:center">
+                        <span class="badge danger">不可用</span>
+                        <button class="btn sm ghost" data-open-blocked="${index}">展开</button>
+                      </div>
+                    </div>`,
+                  )
+                  .join('')}</div>`
+              : emptyState({ title: '全部指标可用', hint: '自身与全部间接上游都正常。' })
+          }
         </div>
       </section>
       <section class="panel">
@@ -116,6 +173,14 @@ export const graphPage = {
               render: (row) => (row.in_cycle ? '<span class="badge danger">在环上</span>' : '<span class="badge ok">正常</span>'),
             },
             {
+              key: 'availability',
+              label: '可用性',
+              render: (row) =>
+                row.availability === 'blocked'
+                  ? `<span class="badge danger" title="${esc(row.block_summary)}">不可用</span>`
+                  : '<span class="badge ok">可用</span>',
+            },
+            {
               key: 'parse_status',
               label: '解析',
               render: (row) => `<span class="badge ${row.parse_status === 'ok' ? 'ok' : 'danger'}">${esc(ENUMS.parseStatus[row.parse_status] || row.parse_status)}</span>`,
@@ -150,6 +215,14 @@ export const graphPage = {
       button.addEventListener('click', (event) => {
         event.stopPropagation();
         openCycle(view, ctx, graph.cycles[Number(button.dataset.openCycle)]);
+      });
+    });
+    view.querySelectorAll('[data-open-blocked]').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const item = graph.blocked[Number(button.dataset.openBlocked)];
+        const node = graph.nodes.find((entry) => entry.code === item.code);
+        if (node) openBlocked(view, ctx, node);
       });
     });
     view.querySelectorAll('table.data tbody tr').forEach((row) => {

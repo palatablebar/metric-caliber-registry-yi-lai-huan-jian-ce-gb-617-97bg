@@ -5,10 +5,10 @@ import { drawer, emptyState, errorBox, errorMessage, esc, field, filterBar, fmtT
 const state = { status: '' };
 
 const EXPORTS = [
-  ['/api/exports/metrics.csv', 'metrics.csv', '指标清单', '48 条口径 + 解析结果 + 下游报表'],
+  ['/api/exports/metrics.csv', 'metrics.csv', '指标清单', '48 条口径 + 可用性 / 阻断链 + 下游报表'],
   ['/api/exports/conflicts.csv', 'conflicts.csv', '冲突与影响面', '同名冲突、差异字段、严重度'],
   ['/api/exports/change-requests.csv', 'change-requests.csv', '变更单', '影响面与审批结论'],
-  ['/api/exports/runs.csv', 'runs.csv', '校验运行记录', '解析失败、环、冲突统计'],
+  ['/api/exports/runs.csv', 'runs.csv', '校验运行记录', '解析失败、环、冲突、可用/阻断统计'],
 ];
 
 function openChange(view, ctx, change) {
@@ -131,6 +131,7 @@ export const changesPage = {
                   <dt>状态</dt><dd>${esc(ENUMS.runStatus[latest.status] || latest.status)}</dd>
                   <dt>输入 / 问题</dt><dd>${esc(latest.input_count)} 条口径 → ${esc(latest.output_count)} 条问题</dd>
                   <dt>冲突 / 环</dt><dd>${esc(latest.metrics?.conflicts_total ?? 0)} 处冲突 / ${esc(latest.metrics?.cycles_total ?? 0)} 个环</dd>
+                  <dt>可用性</dt><dd>可用 ${esc(latest.metrics?.available_total ?? 0)} 个 / 阻断 ${esc(latest.metrics?.blocked_total ?? 0)} 个</dd>
                   <dt>依赖边</dt><dd class="mono">指标 ${esc(latest.metrics?.dep_edges?.metric ?? 0)} · 字段 ${esc(latest.metrics?.dep_edges?.field ?? 0)} · 报表 ${esc(latest.metrics?.dep_edges?.report ?? 0)}</dd>
                   <dt>日志</dt><dd class="tiny">${esc(latest.log_text || '—')}</dd>
                 </dl>`

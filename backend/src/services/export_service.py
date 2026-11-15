@@ -5,6 +5,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.constants.enums import (
+    AVAILABILITY_LABELS,
+    BLOCK_REASON_LABELS,
     CHANGE_KIND_LABELS,
     CHANGE_STATUS_LABELS,
     CONFLICT_KIND_LABELS,
@@ -25,15 +27,18 @@ def metrics_csv(db: Session) -> bytes:
     metrics = db.scalars(select(Metric).order_by(Metric.code)).all()
     latest = formula_service.latest_map(db)
     reports_index = report_service.reports_by_metric(db)
+    availability = graph_service.availability_map(db)
     headers = [
         "指标编码", "指标名称", "业务域", "分级", "单位", "负责人", "当前版本",
-        "解析状态", "解析错误", "表达式", "字段", "过滤条件", "依赖指标", "下游报表", "报表数", "状态",
+        "解析状态", "解析错误", "可用性", "阻断原因", "阻断上游", "阻断链",
+        "表达式", "字段", "过滤条件", "依赖指标", "下游报表", "报表数", "状态",
     ]
     rows = []
     for metric in metrics:
         formula = latest.get(metric.id)
         parsed = (formula.parsed or {}) if formula else {}
         reports = reports_index.get(metric.code, [])
+        verdict = availability.get(metric.code) or {"status": "available", "block_reason": None, "blocked_by": None, "chain": []}
         rows.append(
             [
                 metric.code,
@@ -45,6 +50,10 @@ def metrics_csv(db: Session) -> bytes:
                 metric.current_version,
                 formula.parse_status if formula else "error",
                 (formula.parse_error if formula else "缺少口径公式") or "",
+                AVAILABILITY_LABELS.get(verdict["status"], verdict["status"]),
+                BLOCK_REASON_LABELS.get(verdict["block_reason"], "") if verdict["block_reason"] else "",
+                verdict["blocked_by"] or "",
+                " → ".join(verdict["chain"]),
                 parsed.get("expression") or (formula.dsl_text if formula else ""),
                 " | ".join(parsed.get("fields") or []),
                 " | ".join(parsed.get("filters") or []),
@@ -120,7 +129,7 @@ def runs_csv(db: Session) -> bytes:
     runs = db.scalars(select(Run).order_by(Run.id)).all()
     headers = [
         "运行号", "触发方式", "状态", "指标数", "问题数", "冲突数", "环数",
-        "解析失败数", "操作人", "开始时间", "结束时间", "日志",
+        "解析失败数", "可用指标数", "阻断指标数", "操作人", "开始时间", "结束时间", "日志",
     ]
     rows = [
         [
@@ -132,6 +141,8 @@ def runs_csv(db: Session) -> bytes:
             (run.metrics or {}).get("conflicts_total", 0),
             (run.metrics or {}).get("cycles_total", 0),
             (run.metrics or {}).get("parse_error_count", 0),
+            (run.metrics or {}).get("available_total", 0),
+            (run.metrics or {}).get("blocked_total", 0),
             run.operator_email,
             run.started_at.strftime("%Y-%m-%d %H:%M") if run.started_at else "",
             run.finished_at.strftime("%Y-%m-%d %H:%M") if run.finished_at else "",

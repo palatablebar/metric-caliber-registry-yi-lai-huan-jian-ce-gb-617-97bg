@@ -32,6 +32,13 @@ def cycles(db: Session = Depends(get_db), principal: dict = Depends(require_role
     return dependency_controller.cycles(db)
 
 
+@router.get("/availability")
+def availability(
+    db: Session = Depends(get_db), principal: dict = Depends(require_roles(*READ_ROLES))
+) -> dict:
+    return dependency_controller.availability(db)
+
+
 @router.get("/impact")
 def impact(
     field: str | None = None,
